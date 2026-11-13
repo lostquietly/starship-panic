@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Starship Panic</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="/socket.io/socket.io.js"></script>
+</head>
+<body class="bg-slate-950 text-white font-sans min-h-screen flex flex-col items-center justify-center p-4">
+  <div id="app" class="w-full max-w-2xl bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-2xl">
+    <h1 class="text-2xl font-bold text-cyan-400">🚀 Starship Panic</h1>
+    <p id="status-text" class="text-slate-400 text-sm mt-1">Connecting to Discord Voice Channel...</p>
+
+    <div id="lobby-view" class="hidden mt-6 space-y-4">
+      <div class="bg-slate-950 p-4 rounded-xl border border-slate-800">
+        <h2 class="text-sm uppercase tracking-wider text-slate-400 mb-2">Crew in Voice Call (2–5 Players)</h2>
+        <div id="crew-list" class="flex flex-wrap gap-2"></div>
+      </div>
+      <button onclick="startMission()" class="w-full py-3 bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold rounded-xl transition">
+        Launch Rocket to Mars
+      </button>
+    </div>
+
+    <div id="game-view" class="hidden mt-6 space-y-5">
+      <div class="grid grid-cols-2 gap-4">
+        <div class="bg-slate-950 p-3 rounded-xl border border-slate-800">
+          <div class="flex justify-between text-xs text-slate-400 mb-1">
+            <span>Distance to Mars</span><span id="dist-label">0%</span>
+          </div>
+          <div class="w-full bg-slate-800 h-2.5 rounded-full overflow-hidden">
+            <div id="dist-bar" class="bg-emerald-400 h-full transition-all" style="width: 0%"></div>
+          </div>
+        </div>
+        <div class="bg-slate-950 p-3 rounded-xl border border-slate-800">
+          <div class="flex justify-between text-xs text-slate-400 mb-1">
+            <span>Off-Course Drift</span><span id="drift-label">0%</span>
+          </div>
+          <div class="w-full bg-slate-800 h-2.5 rounded-full overflow-hidden">
+            <div id="drift-bar" class="bg-amber-500 h-full transition-all" style="width: 0%"></div>
+          </div>
+        </div>
+      </div>
+
+      <div id="alert-box" class="bg-rose-950/60 border border-rose-500/50 p-4 rounded-xl text-center">
+        <p class="text-xs uppercase tracking-widest text-rose-300">Incoming Comms</p>
+        <p id="alert-text" class="text-lg font-bold text-white mt-1">Waiting for telemetry...</p>
+      </div>
+
+      <div>
+        <h3 class="text-xs uppercase tracking-wider text-slate-400 mb-3">Your Assigned Control Panels</h3>
+        <div id="panels-grid" class="grid grid-cols-1 sm:grid-cols-2 gap-3"></div>
+      </div>
+    </div>
+
+    <div id="end-view" class="hidden mt-6 bg-slate-950 p-6 rounded-xl border border-purple-500/40 text-center space-y-3">
+      <h2 id="end-title" class="text-2xl font-bold text-purple-400">🪐 Secret Planet Discovered!</h2>
+      <p id="end-desc" class="text-slate-300 text-sm">Scanning atmosphere with Ship AI...</p>
+      <p id="end-roast" class="text-amber-300 italic text-sm"></p>
+      <button onclick="startMission()" class="mt-4 px-6 py-2.5 bg-purple-500 hover:bg-purple-400 text-slate-950 font-bold rounded-xl">
+        Fly Again
+      </button>
+    </div>
+  </div>
+
+  <script type="module">
+    import { DiscordSDK } from "https://esm.sh/@discord/embedded-app-sdk";
+
+    const CLIENT_ID = "1570718392854253622";
+    const discordSdk = new DiscordSDK(CLIENT_ID);
+    const socket = io();
+    let currentUser = { username: "Cadet" };
+    let instanceId = "local-test";
+
+    async function init() {
+      try {
+        await discordSdk.ready();
+        instanceId = discordSdk.instanceId;
+        const { code } = await discordSdk.commands.authorize({
+          client_id: CLIENT_ID,
+          response_type: "code",
+          state: "",
+          prompt: "none",
+          scope: ["identify"],
+        });
+        const res = await fetch("/api/token", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ code }),
+        });
+        const { access_token } = await res.json();
+        const auth = await discordSdk.commands.authenticate({ access_token });
+        currentUser = auth.user;
+      } catch (e) {
+        console.warn("Running outside Discord iframe fallback:", e);
+      }
+
+      document.getElementById("status-text").innerText = `Logged in as ${currentUser.username}`;
+      socket.emit("join-ship", { instanceId, user: currentUser });
+    }
+
+    window.startMission = () => socket.emit("start-mission");
+    window.sendControl = (moduleId, newValue) => socket.emit("update-control", { moduleId, newValue });
+
+    socket.on("state-update", (state) => {
+      document.getElementById("lobby-view").classList.toggle("hidden", state.status !== "LOBBY");
+      document.getElementById("game-view").classList.toggle("hidden", state.status !== "FLYING");
+      document.getElementById("end-view").classList.toggle("hidden", state.status !== "SECRET_PLANET" && state.status !== "VICTORY");
+
+      const crewList = document.getElementById("crew-list");
+      crewList.innerHTML = Object.values(state.players)
+        .map((p) => `<span class="px-3 py-1 bg-slate-800 rounded-full text-xs text-cyan-300">👨‍🚀 ${p.username}</span>`)
+        .join("");
+
+      if (state.status === "FLYING") {
+        document.getElementById("dist-bar").style.width = `${state.distance}%`;
+        document.getElementById("dist-label").innerText = `${state.distance}%`;
+        document.getElementById("drift-bar").style.width = `${state.drift}%`;
+        document.getElementById("drift-label").innerText = `${state.drift}%`;
+
+        const alertText = document.getElementById("alert-text");
+        if (state.currentAlert) {
+          if (state.currentAlert.messengerId === socket.id) {
+            alertText.innerText = `TELL ${state.currentAlert.ownerName.toUpperCase()}: ${state.currentAlert.instruction}`;
+          } else {
+            alertText.innerText = `Listen to your crew on voice chat!`;
+          }
+        }
+
+        const myPanels = state.modules.filter((m) => m.ownerId === socket.id);
+        const grid = document.getElementById("panels-grid");
+        grid.innerHTML = myPanels
+          .map((m) => {
+            if (m.type === "slider") {
+              return `<div class="bg-slate-950 p-4 rounded-xl border border-slate-800">
+                <div class="flex justify-between text-sm font-semibold mb-2"><span>${m.name}</span><span class="text-cyan-400">${m.value}${m.unit}</span></div>
+                <input type="range" min="0" max="100" step="15" value="${m.value}" onchange="sendControl('${m.id}', Number(this.value))" class="w-full accent-cyan-400" />
+              </div>`;
+            } else if (m.type === "toggle") {
+              return `<div class="bg-slate-950 p-4 rounded-xl border border-slate-800 flex items-center justify-between">
+                <span class="text-sm font-semibold">${m.name}</span>
+                <button onclick="sendControl('${m.id}', ${!m.value})" class="px-4 py-1.5 rounded-lg font-bold text-xs ${m.value ? "bg-emerald-500 text-slate-950" : "bg-slate-800 text-slate-300"}">${m.value ? "ON" : "OFF"}</button>
+              </div>`;
+            } else {
+              return `<div class="bg-slate-950 p-4 rounded-xl border border-slate-800 flex items-center justify-between">
+                <span class="text-sm font-semibold">${m.name}</span>
+                <button onclick="sendControl('${m.id}', '${m.value === "IDLE" ? "PRIMED" : "IDLE"}')" class="px-4 py-1.5 rounded-lg font-bold text-xs bg-amber-500 text-slate-950">${m.value}</button>
+              </div>`;
+            }
+          })
+          .join("");
+      }
+
+      if (state.status === "VICTORY") {
+        document.getElementById("end-title").innerText = "🎉 Landed Safely on Mars!";
+        document.getElementById("end-desc").innerText = "Against all odds, nobody pressed the wrong button.";
+        document.getElementById("end-roast").innerText = "";
+      } else if (state.status === "SECRET_PLANET") {
+        document.getElementById("end-title").innerText = state.secretPlanet ? `🪐 ${state.secretPlanet.planetName}` : "🪐 Off-Course! Entering Unknown Orbit...";
+        document.getElementById("end-desc").innerText = state.secretPlanet ? state.secretPlanet.hazardDescription : "Ship AI is analyzing your crash landing...";
+        document.getElementById("end-roast").innerText = state.secretPlanet ? `"${state.secretPlanet.captainRoast}"` : "";
+      }
+    });
+
+    init();
+  </script>
+</body>
+</html>
